@@ -16,6 +16,7 @@
 #X obj 74 649 *;
 #X obj 74 699 outlet;
 #X obj 24 349 - \$1;
+#X obj 174 649 clip 20 20000;
 #X connect 0 0 2 0;
 #X connect 1 0 3 0 32.................B....X6+++u.....19+++a.....;
 #X connect 2 0 4 0;
@@ -34,5 +35,6 @@
 #X connect 11 1 13 1;
 #X connect 12 0 13 0 32.................P....nA....D....Z....7A....;
 #X connect 13 0 14 0;
-#X connect 14 0 15 0;
+#X connect 14 0 17 0;
+#X connect 17 0 15 0;
 #X connect 16 0 9 0;
