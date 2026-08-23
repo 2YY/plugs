@@ -28,7 +28,7 @@
 #X obj 74 849 sig~;
 #X obj 24 949 outlet~;
 #X obj 274 124 loadbang;
-#X text -251 -2 \$1: アップワードなら -1 \, さもなければ 1 \; \$2: AttackMsValue \; \$3: ReleaseMsValue \; \$4: ThresholdUpValue \; \$5: RatioUpInvValue;
+#X text -426 -2 \$1: アップワードなら -1 \, さもなければ 1 \; \$2: AttackMsValue (ダウンワードの場合はリリースが入るので注意) \; \$3: ReleaseMsValue (アップワードの場合はアタックが入るので注意) \; \$4: ThresholdUpValue \; \$5: RatioUpInvValue;
 #X connect 0 0 1 0;
 #X connect 1 0 23 0;
 #X connect 1 0 8 0;
