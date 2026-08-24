@@ -24,11 +24,11 @@
 #X obj 449 624 param OutputGain 1;
 #X obj 549 374 s OutputGainDbValue;
 #X obj 274 49 knob 50 0.1 5000 1 10 empty empty #191919 #696969 #e1e1e1 1 0 0 0 1 320 0 0 0 empty empty 0 8 0 0 0 1 0 0;
-#X msg 1874 574 create 0.1 0.1 5000;
+#X msg 1874 574 create 10 0.1 5000;
 #X obj 1874 624 param Attack 1;
 #X obj 499 124 s AttackKnobMsValue;
 #X obj 324 49 knob 50 0.1 5000 1 200 empty empty #191919 #696969 #e1e1e1 1 0 0 0 1 320 0 0 0 empty empty 0 8 0 0 0 1 0 0;
-#X msg 2199 574 create 0.1 0.1 5000;
+#X msg 2199 574 create 200 0.1 5000;
 #X obj 2199 624 param Release 1;
 #X obj 649 124 s ReleaseKnobMsValue;
 #X obj 399 49 knob 50 10 1000 1 100 empty empty #191919 #696969 #e1e1e1 1 0 0 0 1 320 0 0 0 empty empty 0 8 0 0 0 1 0 0;
