@@ -1,0 +1,12 @@
+#N canvas 827 239 734 565 12;
+#X obj 199 99 r AmountValue;
+#X obj 49 149 expr~ $v1*$f2*0.01;
+#X obj 24 199 dbgain~;
+#X obj 24 24 inlet~;
+#X obj 24 349 outlet~;
+#X obj 49 99 r OutputGainDbValue;
+#X connect 0 0 1 1 32.................P.....8+++OD....P+++++A....;
+#X connect 1 0 2 1 32.................P....n.....D....J....7A....;
+#X connect 2 0 4 0;
+#X connect 3 0 2 0;
+#X connect 5 0 1 0;
