@@ -1,0 +1,441 @@
+# dyn.pd
+
+```elixir
+Mix.install([
+  {:kino_vega_lite, "~> 0.1.13"}
+])
+
+alias VegaLite, as: Vl
+```
+
+## これは何
+
+* コンプレッサー兼エキスパンダー
+  * アップワード方向とダウンワード方向それぞれに対して処理を適用する。
+
+[https://github.com/2YY/plugs/tree/main/dyn](https://github.com/2YY/plugs/tree/main/dyn)
+
+## 全体像
+
+```mermaid
+flowchart LR
+    IN((" ")) -->|信号| IG["Input Gain"]
+    IG --> UP["アップワード処理部"]
+    UP --> DOWN["ダウンワード処理部"]
+    DOWN --> OG["Output Gain"]
+    OG --> CLIP["ハードクリップ"]
+    CLIP -->|信号| OUT((" "))
+
+    style IN fill:none,stroke:none
+    style OUT fill:none,stroke:none
+```
+
+## パラメータ
+
+| パラメータ名 | 範囲       | デフォルト |
+| ------------------ | ------------ | --------------- |
+| `ThresholdUp`      | -80 〜 0    | -60             |
+| `ThresholdDown`    | -80 〜 0    | -20             |
+| `RatioUp`          | 0.25 〜 100 | 1               |
+| `RatioDown`        | 0.5 〜 100  | 1               |
+| `InputGain`        | -24 〜 24   | 0               |
+| `OutputGain`       | -24 〜 24   | 0               |
+| `Attack`           | 0.1 〜 5000 | 10              |
+| `Release`          | 0.1 〜 5000 | 200             |
+| `Time`             | 10 〜 1000  | 100             |
+| `Knee`             | 0 〜 12     | 6               |
+| `Amount`           | 0 〜 100    | 100             |
+
+## Input Gain
+
+入力ゲインを調整する。調整量はdBで指定するが、指定したその値は`AmountValue`によって乗算されるので、`AmountValue`が`0`の場合、`InputGainDbValue`の値に関わらず、調整量も`0`となる。
+
+### パラメータ
+
+| パラメータ名 | 範囲     |
+| ------------------ | ---------- |
+| `InputGainDbValue` | -24 〜 24 |
+| `AmountValue`      | 0 〜 100  |
+
+### 処理内容
+
+$$
+\text{適用ゲイン量} = x = \text{InputGainDbValue} \times \text{AmountValue} \times 0.01
+$$
+
+```elixir
+gains = for g <- -24..24, do: g * 1.0
+
+input_gain_data =
+  for amount <- [0, 25, 50, 100], g <- gains do
+    %{gain: g, x: g * amount * 0.01, amount: "AmountValue=#{amount}"}
+  end
+
+Vl.new(width: 600, height: 300)
+|> Vl.data_from_values(input_gain_data)
+|> Vl.mark(:line)
+|> Vl.encode_field(:x, "gain", type: :quantitative, title: "InputGainDbValue")
+|> Vl.encode_field(:y, "x", type: :quantitative, title: "x")
+|> Vl.encode_field(:color, "amount",
+  type: :ordinal,
+  title: "",
+  scale: [
+    domain: for(amount <- [0, 25, 50, 100], do: "AmountValue=#{amount}"),
+    range: ["#86b6ef", "#3987e5", "#1c5cab", "#0d366b"]
+  ]
+)
+```
+
+```elixir
+input_gain_x = fn gain_db, amount -> gain_db * amount * 0.01 end
+
+checks = [
+  {"Amount=100の場合、xがInputGainDbValueと同じ値となること", input_gain_x.(6, 100) == 6.0},
+  {"Amount=0の場合、xが常に0となること", input_gain_x.(6, 0) == 0.0},
+  {"Amount=50の場合、xがInputGainDbValueの半分となること", input_gain_x.(6, 50) == 3.0},
+  {"InputGainDbValueが負の場合、xも同じ式で計算された値となること", input_gain_x.(-12, 100) == -12.0}
+]
+
+for {name, ok} <- checks do
+  IO.puts("#{if ok, do: "✅", else: "❌"} #{name}")
+end
+
+if Enum.all?(checks, fn {_, ok} -> ok end) do
+  :ok
+else
+  failed = Enum.count(checks, fn {_, ok} -> not ok end)
+  raise "#{failed} check#{if failed == 1, do: "", else: "s"} failed"
+end
+```
+
+## アップワード処理部
+
+### 全体像
+
+```mermaid
+flowchart LR
+    IN["入力"] --> RMS["RMS算出"]
+    IN --> MULT(("×"))
+    RMS --> OVER["差分算出"]
+    OVER --> KNEE["ニー適用"]
+    KNEE --> GAIN["ゲイン算出"]
+    GAIN --> GLIDE["アタック・リリース適用"]
+    GLIDE --> DB2LIN["db2lin~"]
+    DB2LIN --> MULT
+    MULT -->|信号| OUT((" "))
+
+    style OUT fill:none,stroke:none
+```
+
+### RMS検出
+
+RMSを検出する。ウィンドウ長はオーディオレートに関わらず、2.5ms固定。
+
+### 差分算出
+
+スレッショルド値とRMS値の差分を求める。-Inf を避けるため `max(RMS, -120)` としている。
+
+#### パラメータ
+
+| パラメータ名 | 範囲    |
+| ------------------ | --------- |
+| `ThresholdUp`      | -80 〜 0 |
+
+#### 処理内容
+
+$$
+\text{差分} = \text{ThresholdUp} - \max(\text{RMS}, -120)
+$$
+
+```elixir
+rms_levels = for r <- -120..0, do: r * 1.0
+
+diff_data =
+  for threshold <- [-80, -60, -40, -20, 0], rms <- rms_levels do
+    %{rms: rms, diff: threshold - max(rms, -120), threshold: "ThresholdUp=#{threshold}"}
+  end
+
+Vl.new(width: 600, height: 300)
+|> Vl.data_from_values(diff_data)
+|> Vl.mark(:line)
+|> Vl.encode_field(:x, "rms", type: :quantitative, title: "RMS")
+|> Vl.encode_field(:y, "diff", type: :quantitative, title: "差分")
+|> Vl.encode_field(:color, "threshold",
+  type: :ordinal,
+  title: "",
+  scale: [
+    domain: for(threshold <- [-80, -60, -40, -20, 0], do: "ThresholdUp=#{threshold}"),
+    range: ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"]
+  ]
+)
+```
+
+```elixir
+input_diff = fn threshold, rms -> threshold - max(rms, -120) end
+
+checks = [
+  {"RMSがThresholdUpを下回る場合、差分が正となること", input_diff.(-60, -80) > 0},
+  {"RMSがThresholdUpを上回る場合、差分が負となること", input_diff.(-60, -40) < 0},
+  {"RMSがThresholdUpと等しい場合、差分が0となること", input_diff.(-60, -60) == 0},
+  {"RMSが-120を下回る場合、差分が-120でクランプされた値となること", input_diff.(-60, -200) == input_diff.(-60, -120)}
+]
+
+for {name, ok} <- checks do
+  IO.puts("#{if ok, do: "✅", else: "❌"} #{name}")
+end
+
+if Enum.all?(checks, fn {_, ok} -> ok end) do
+  :ok
+else
+  failed = Enum.count(checks, fn {_, ok} -> not ok end)
+  raise "#{failed} check#{if failed == 1, do: "", else: "s"} failed"
+end
+```
+
+### ニー適用
+
+差分を`Knee`幅で滑らかに整形する。`Knee`が0ならハードニー(差分をそのまま0未満で0にクリップ)、0より大きければ、しきい値付近をなだらかに移行するソフトニーになる。
+
+#### パラメータ
+
+| パラメータ名 | 範囲   |
+| ------------------ | -------- |
+| `Knee`             | 0 〜 12 |
+
+#### 処理内容
+
+$$
+\text{ニー適用後} =
+\begin{cases}
+\max(\text{差分}, 0) & \text{Knee} \le 0 \\
+\text{差分} & \text{差分} \ge \text{Knee} \\
+0 & \text{差分} \le -\text{Knee} \\
+\dfrac{(\text{差分} + \text{Knee})^2}{4 \cdot \text{Knee}} & \text{それ以外}
+\end{cases}
+$$
+
+```elixir
+over_levels = for o <- -20..20, do: o * 1.0
+
+knee_fn = fn over, knee ->
+  cond do
+    knee <= 0 -> max(over, 0)
+    over >= knee -> over
+    over <= -knee -> 0
+    true -> :math.pow(over + knee, 2) / (4 * knee)
+  end
+end
+
+knee_data =
+  for knee <- [0, 3, 6, 9, 12], over <- over_levels do
+    %{over: over, kneed: knee_fn.(over, knee), knee: "Knee=#{knee}"}
+  end
+
+Vl.new(width: 600, height: 300)
+|> Vl.data_from_values(knee_data)
+|> Vl.mark(:line)
+|> Vl.encode_field(:x, "over", type: :quantitative, title: "差分")
+|> Vl.encode_field(:y, "kneed", type: :quantitative, title: "ニー適用後")
+|> Vl.encode_field(:color, "knee",
+  type: :ordinal,
+  title: "",
+  scale: [
+    domain: for(knee <- [0, 3, 6, 9, 12], do: "Knee=#{knee}"),
+    range: ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"]
+  ]
+)
+```
+
+```elixir
+checks = [
+  {"Kneeが0の場合、差分が0以上ならそのままの値となること", knee_fn.(10, 0) == 10},
+  {"Kneeが0の場合、差分が0未満なら0となること", knee_fn.(-10, 0) == 0},
+  {"差分がKnee以上の場合、そのままの値となること", knee_fn.(10, 6) == 10},
+  {"差分が-Knee以下の場合、0となること", knee_fn.(-10, 6) == 0},
+  {"差分=Kneeの場合、ソフトニー境界で値が連続すること", abs(knee_fn.(6.0, 6) - 6.0) < 1.0e-9}
+]
+
+for {name, ok} <- checks do
+  IO.puts("#{if ok, do: "✅", else: "❌"} #{name}")
+end
+
+if Enum.all?(checks, fn {_, ok} -> ok end) do
+  :ok
+else
+  failed = Enum.count(checks, fn {_, ok} -> not ok end)
+  raise "#{failed} check#{if failed == 1, do: "", else: "s"} failed"
+end
+```
+
+### ゲイン算出
+
+ニー適用後の値に`RatioUp`と`Amount`を反映して、最終的なゲイン変化量(dB)を求める。`RatioUp`が1なら変化なし、1より大きいほど強く圧縮/拡大がかかる。
+
+このゲイン自体には上限のクランプを設けていない(`RatioUp >= 1`である限り、出力レベルは数式上`ThresholdUp`未満に自己収束するため不要)。暴走しうるのは`RatioUp`/`RatioDown`を意図的に1未満にする特殊な使い方をしたときだけで、その安全対策は`dyn.pd`の出力直前(`clip~ -1 1`によるハードクリップ)で行っている。
+
+#### パラメータ
+
+| パラメータ名 | 範囲       |
+| ------------------ | ------------ |
+| `RatioUp`          | 0.25 〜 100 |
+| `Amount`           | 0 〜 100    |
+
+#### 処理内容
+
+$$
+\text{ゲイン(dB)} = \frac{\text{Amount}}{100} \times \left(1 - \frac{1}{\max(\text{RatioUp}, 0.01)}\right) \times \text{ニー適用後}
+$$
+
+```elixir
+over_levels = for o <- -20..20, do: o * 1.0
+
+knee_fn = fn over, knee ->
+  cond do
+    knee <= 0 -> max(over, 0)
+    over >= knee -> over
+    over <= -knee -> 0
+    true -> :math.pow(over + knee, 2) / (4 * knee)
+  end
+end
+
+gain_fn = fn over, knee, ratio, amount ->
+  ratio_inv = 1 / max(ratio, 0.01)
+  amount * 0.01 * (1 - ratio_inv) * knee_fn.(over, knee)
+end
+
+gain_data =
+  for ratio <- [0.5, 1, 2, 6, 12], over <- over_levels do
+    %{over: over, gain: gain_fn.(over, 6, ratio, 100), ratio: "RatioUp=#{ratio}"}
+  end
+
+Vl.new(width: 600, height: 300)
+|> Vl.data_from_values(gain_data)
+|> Vl.mark(:line)
+|> Vl.encode_field(:x, "over", type: :quantitative, title: "差分")
+|> Vl.encode_field(:y, "gain", type: :quantitative, title: "ゲイン(dB)")
+|> Vl.encode_field(:color, "ratio",
+  type: :ordinal,
+  title: "",
+  scale: [
+    domain: for(ratio <- [0.5, 1, 2, 6, 12], do: "RatioUp=#{ratio}"),
+    range: ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"]
+  ]
+)
+```
+
+```elixir
+checks = [
+  {"Amountが0の場合、ゲインが常に0となること", gain_fn.(10, 6, 2, 0) == 0},
+  {"RatioUpが1の場合、ゲインが常に0となること(圧縮/拡張なし)", gain_fn.(10, 6, 1, 100) == 0},
+  {"RatioUp>1かつ差分が正(静か)の場合、ゲインが正(ブースト)となること", gain_fn.(10, 6, 2, 100) > 0},
+  {"RatioUp<1かつ差分が正の場合、ゲインが負(カット)となること", gain_fn.(10, 6, 0.5, 100) < 0},
+  {"ゲインにクランプは無く、差分に比例して大きくなり続けること", gain_fn.(1000, 0, 100, 100) > 36}
+]
+
+for {name, ok} <- checks do
+  IO.puts("#{if ok, do: "✅", else: "❌"} #{name}")
+end
+
+if Enum.all?(checks, fn {_, ok} -> ok end) do
+  :ok
+else
+  failed = Enum.count(checks, fn {_, ok} -> not ok end)
+  raise "#{failed} check#{if failed == 1, do: "", else: "s"} failed"
+end
+```
+
+### アタック・リリース適用
+
+ゲイン算出の結果(瞬間値)をそのまま音量に反映すると、値が飛んでクリック音(ジッパーノイズ)が出てしまうため、`glide2~`で`Attack`/`Release`の時間をかけてなめらかに追従させる。
+
+`glide2~`は値が**上昇するとき**と**下降するとき**で別々の時間を持てる。アップワード処理部では、ゲインが上がる(ブーストが強まる)ときに`Attack`、下がるときに`Release`がそのまま使われる。ダウンワード処理部ではゲインが負の値(カット)で、カットが強まるほど値は**下降**するため、`Attack`と`Release`が値の増減に対して入れ替わって渡される(`stage.pd`のコメント参照)。
+
+#### パラメータ
+
+| パラメータ名 | 範囲       |
+| ------------------ | ------------ |
+| `Attack`           | 0.1 〜 5000 |
+| `Release`          | 0.1 〜 5000 |
+
+#### 処理内容
+
+`glide2~`はELSEライブラリの実装まかせのため詳細な数式化はしないが、[実ソース](https://github.com/porres/pd-else/blob/master/Source/Audio/glide2~.c)で挙動を確認済み: 入力(目標値)が1サンプル前の値と違うたびにランプをそこから再スタートする作りになっており、`stage.pd`のように毎サンプル変化する信号を渡すと、指定時間で直線的に到達するのではなく、1次のリーク積分(非対称なワンポール・スムージングで、目標値には指数関数的に漸近する)として働く。
+
+## ダウンワード処理部
+
+### 全体像
+
+```mermaid
+flowchart LR
+    DIN["入力"] --> DRMS["RMS算出"]
+    DIN --> DMULT(("×"))
+    DRMS --> DOVER["差分算出"]
+    DOVER --> DKNEE["ニー適用"]
+    DKNEE --> DGAIN["ゲイン算出"]
+    DGAIN --> DGLIDE["アタック・リリース適用"]
+    DGLIDE --> DDB2LIN["db2lin~"]
+    DDB2LIN --> DMULT
+    DMULT -->|信号| DOUT((" "))
+
+    style DOUT fill:none,stroke:none
+```
+
+## Output Gain
+
+出力ゲインを調整する。調整量はdBで指定するが、指定したその値は`AmountValue`によって乗算されるので、`AmountValue`が`0`の場合、`OutputGainDbValue`の値に関わらず、調整量も`0`となる。
+
+### パラメータ
+
+| パラメータ名  | 範囲     |
+| ------------------- | ---------- |
+| `OutputGainDbValue` | -24 〜 24 |
+| `AmountValue`       | 0 〜 100  |
+
+### 処理内容
+
+$$
+\text{適用ゲイン量} = x = \text{OutputGainDbValue} \times \text{AmountValue} \times 0.01
+$$
+
+## ハードクリップ
+
+出力直前に置かれた安全装置。`RatioUp`・`RatioDown`をともに1以上で使う通常の設定では、数式上0dBFSに到達し得ないため実質発動しない。`RatioDown`を意図的に1未満にする特殊な設定で、かつ信号が大きいときにだけ発動しうる、まれなイレギュラー用の保険。
+
+#### 処理内容
+
+$$
+y = \min(\max(x, -1), 1)
+$$
+
+```elixir
+hard_clip = fn x -> x |> max(-1) |> min(1) end
+
+samples = for s <- -20..20, do: s * 0.1
+
+clip_data = for s <- samples, do: %{input: s, output: hard_clip.(s)}
+
+Vl.new(width: 400, height: 300)
+|> Vl.data_from_values(clip_data)
+|> Vl.mark(:line)
+|> Vl.encode_field(:x, "input", type: :quantitative, title: "入力")
+|> Vl.encode_field(:y, "output", type: :quantitative, title: "出力")
+```
+
+```elixir
+checks = [
+  {"範囲内(-1〜1)の値はそのまま通ること", hard_clip.(0.5) == 0.5},
+  {"1を超える値は1にクリップされること", hard_clip.(2.0) == 1.0},
+  {"-1を下回る値は-1にクリップされること", hard_clip.(-2.0) == -1.0}
+]
+
+for {name, ok} <- checks do
+  IO.puts("#{if ok, do: "✅", else: "❌"} #{name}")
+end
+
+if Enum.all?(checks, fn {_, ok} -> ok end) do
+  :ok
+else
+  failed = Enum.count(checks, fn {_, ok} -> not ok end)
+  raise "#{failed} check#{if failed == 1, do: "", else: "s"} failed"
+end
+```
