@@ -1,5 +1,8 @@
 .DS_Store
 
+# Playwright MCP の一時データ(コンソールログ・スナップショット等)
+.playwright-mcp/
+
 # docs/ (Elixir/Livebook project)
 docs/_build/
 docs/deps/
