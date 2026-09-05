@@ -170,7 +170,7 @@
 #X obj 224 1400 r ThresholdDownValue;
 #X obj 374 1400 r RatioDownInvValue;
 #X obj 24 1450 pack f f f f f f;
-#X obj 649 49 tgl 20 1 empty empty empty 0 -8 0 10 #191919 #e1e1e1 #e1e1e1 1 1;
+#X obj 649 49 tgl 20 1 empty empty empty 0 -8 0 10 #191919 #e1e1e1 #e1e1e1 0 1;
 #X text 649 23 AA;
 #X obj 649 74 s AntiAliasValue;
 #X obj 549 174 knob 50 0 60 0 39.48 empty empty #191919 #696969 #e1e1e1 1 0 0 0 1 320 0 0 0 empty empty 0 8 0 0 0 1 0 0;
