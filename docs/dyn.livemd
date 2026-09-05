@@ -23,8 +23,7 @@ flowchart LR
     IG --> UP["アップワード処理部"]
     UP --> DOWN["ダウンワード処理部"]
     DOWN --> OG["Output Gain"]
-    OG --> CLIP["ハードクリップ"]
-    CLIP -->|信号| OUT((" "))
+    OG -->|信号| OUT((" "))
 
     style IN fill:none,stroke:none
     style OUT fill:none,stroke:none
@@ -116,11 +115,12 @@ end
 flowchart LR
     IN["入力"] --> RMS["RMS算出"]
     IN --> MULT(("×"))
-    RMS --> OVER["差分算出"]
+    RMS --> GLIDE["アタック・リリース適用"]
+    GLIDE --> OVER["差分算出"]
     OVER --> KNEE["ニー適用"]
     KNEE --> GAIN["ゲイン算出"]
-    GAIN --> GLIDE["アタック・リリース適用"]
-    GLIDE --> DB2LIN["db2lin~"]
+    GAIN --> CLAMP["スパイク抑制"]
+    CLAMP --> DB2LIN["db2lin~"]
     DB2LIN --> MULT
     MULT -->|信号| OUT((" "))
 
@@ -129,36 +129,69 @@ flowchart LR
 
 ### RMS検出
 
-RMSを検出する。ウィンドウ長はオーディオレートに関わらず、2.5ms固定。
+RMSを検出する。ウィンドウ長は`RmsWindowMs`ノブで調整可能(0.5〜30ms、デフォルト8ms)。以前は2.5ms固定だったが、808のような低いファンダメンタルを持つ素材ではウィンドウが基音の半周期より短いと生RMS自体が周期的にリップルし、これが`safe_max_gain`のゲイン変調ノイズ(高域の歪み)の発生源になっていたため、調整可能にした。ウィンドウを伸ばすほどこのリップルは減るが、無音明けのレベル検出そのものが遅れるぶん、短いオーバーシュートが出やすくなるトレードオフがある。
+
+### アタック・リリース適用
+
+RMSで検出した瞬間値をそのまま次段に渡すと、値が飛んでクリック音(ジッパーノイズ)が出てしまうため、`lag2~`で`Attack`/`Release`の時間をかけてレベル自体をなめらかに追従させる。以降の差分算出・ニー適用・ゲイン算出は、すべてこの平滑化後のレベルを使って行う。
+
+アナログ機材のVCA/オプト素子によるゲイン制御はRC(コンデンサ充放電)特性を持ち、指数関数的に目標値へ漸近するのが一般的。多くの実機は、検出したレベル自体をこのRC特性でなだらかにしてから静的なカーブに通す設計になっている。`lag2~`はこれを模した非対称なワンポール(一次遅れ)フィルタで、値が**上昇するとき**と**下降するとき**で別々の時定数(`Attack`/`Release`)を持てる。
+
+レベルが上昇するとき(音が大きくなっていくとき)と下降するとき(小さくなっていくとき)のどちらに`Attack`/`Release`が対応するかは、アップワード/ダウンワードで逆になる。ダウンワード処理部は素直に「レベル上昇=圧縮がかかり始める=Attack、レベル下降=圧縮が抜ける=Release」。アップワード処理部は逆に、「レベル下降=ブーストがかかり始める=Attack、レベル上昇=ブーストが抜ける=Release」となる(`stage.pd`内部で`$2`/`$3`の行き先を入れ替えて対応、コメント参照)。
+
+#### パラメータ
+
+| パラメータ名 | 範囲       |
+| ------------------ | ------------ |
+| `Attack`           | 0.1 〜 5000 |
+| `Release`          | 0.1 〜 5000 |
+
+#### 処理内容
+
+`lag2~`は[実ソース](https://github.com/porres/pd-else/blob/master/Source/Audio/lag2~.c)で確認した通り、毎サンプル
+
+$$
+y_n = x_n + a \cdot (y_{n-1} - x_n)
+$$
+
+を計算する非対称ワンポールフィルタ。$a = \exp(\ln(0.001) / (\text{ms} \times \text{サンプルレート}_{kHz}))$ で、渡された"ms"の時間で目標値の**0.1%以内**に収束するように減衰係数を決めている。直前の出力だけを状態として持ち同じ式を適用し続けるので、目標値がサンプルごとに変化しても不連続なく指数関数的な漸近を保つ。
+
+**単位変換**: `lag2~`の"ms"は0.1%収束点(0.1%はほぼ完全な収束)を指すが、一般的な工学的「時定数(τ)」は63.2%収束点を指す。0.1%収束点は時定数の$\ln(1000) \approx 6.908$倍の位置にあるため、`lag2~`にそのまま`AttackMsValue`/`ReleaseMsValue`を渡すと、ユーザーが指定した"ms"の実質的な反応速度は想定よりかなり速く(鋭く)なってしまう。これは808のような低いファンダメンタルを持つ素材で、Attack/Releaseが速すぎることに起因する歪みとして実際に確認された。そのため`stage.pd`では、`lag2~`に渡す直前に`AttackMsValue`/`ReleaseMsValue`を`ln(1000)`倍している。これにより"ms"の実質的な意味が、より一般的な「1時定数(63%収束点)」に近づく。この係数は新しい恣意的な定数ではなく、`lag2~`自身の指数減衰の式(0.1%収束点の定義)から導かれる単位変換値である。
+
+(以前は直線ランプの`glide2~`をゲイン算出**後**に適用していたが、実機のVCA/オプト回路によく見られる「レベル検出後・カーブ適用前に平滑化する」構成に近づけるため、`lag2~`をレベル検出の直後に移し、カーブ形状も指数関数的なものに切り替えた。)
 
 ### 差分算出
 
-スレッショルド値とRMS値の差分を求める。-Inf を避けるため `max(RMS, -120)` としている。
+スレッショルド値と、アタック・リリース適用後のレベルとの差分を求める。-Inf を避けるため `max(レベル, ThresholdUp - Range)` としている。これは「ThresholdUpから`Range`dB下までしかブーストの根拠にしない」というフロアで、これより深いレベルは全てThresholdUp-Rangeとして扱われる(無音時にRatioUpがほぼ無限大でも、ゲインが`Range`dBを超えて際限なく大きくならないようにするためのもの)。
+
+`Range`はUIのノブとして調整可能(0〜60dB、デフォルト39.48)。以前は絶対値の`-46.5dB`という固定フロアを使っていたが、これだとThresholdUpを動かすたびに実質的なブースト上限(Threshold - フロア)が意図せず変動してしまう問題があった。閾値からの相対距離にすることで、Thresholdの値によらず一貫した最大ブースト量になる。当初はAbleton Live付属Multiband Dynamicsとの出音比較(wav解析)から15という値を試したが、その後「クランプ(safe_max_gain)の生RMSリップル対策」(後述)を実装したうえで実機確認を重ね、39.48に調整された。
 
 #### パラメータ
 
 | パラメータ名 | 範囲    |
 | ------------------ | --------- |
+| `Range`             | 0 〜 60  |
 | `ThresholdUp`      | -80 〜 0 |
 
 #### 処理内容
 
 $$
-\text{差分} = \text{ThresholdUp} - \max(\text{RMS}, -120)
+\text{差分} = \text{ThresholdUp} - \max(\text{レベル}, \text{ThresholdUp} - \text{Range})
 $$
 
 ```elixir
 rms_levels = for r <- -120..0, do: r * 1.0
+range = 15.0
 
 diff_data =
   for threshold <- [-80, -60, -40, -20, 0], rms <- rms_levels do
-    %{rms: rms, diff: threshold - max(rms, -120), threshold: "ThresholdUp=#{threshold}"}
+    %{rms: rms, diff: threshold - max(rms, threshold - range), threshold: "ThresholdUp=#{threshold}"}
   end
 
 Vl.new(width: 600, height: 300)
 |> Vl.data_from_values(diff_data)
 |> Vl.mark(:line)
-|> Vl.encode_field(:x, "rms", type: :quantitative, title: "RMS")
+|> Vl.encode_field(:x, "rms", type: :quantitative, title: "レベル(アタック・リリース適用後)")
 |> Vl.encode_field(:y, "diff", type: :quantitative, title: "差分")
 |> Vl.encode_field(:color, "threshold",
   type: :ordinal,
@@ -171,13 +204,14 @@ Vl.new(width: 600, height: 300)
 ```
 
 ```elixir
-input_diff = fn threshold, rms -> threshold - max(rms, -120) end
+range = 15.0
+input_diff = fn threshold, rms -> threshold - max(rms, threshold - range) end
 
 checks = [
-  {"RMSがThresholdUpを下回る場合、差分が正となること", input_diff.(-60, -80) > 0},
-  {"RMSがThresholdUpを上回る場合、差分が負となること", input_diff.(-60, -40) < 0},
-  {"RMSがThresholdUpと等しい場合、差分が0となること", input_diff.(-60, -60) == 0},
-  {"RMSが-120を下回る場合、差分が-120でクランプされた値となること", input_diff.(-60, -200) == input_diff.(-60, -120)}
+  {"レベルがThresholdUpを下回る場合、差分が正となること", input_diff.(0, -80) > 0},
+  {"レベルがThresholdUpを上回る場合、差分が負となること", input_diff.(-30, -20) < 0},
+  {"レベルがThresholdUpと等しい場合、差分が0となること", input_diff.(-20, -20) == 0},
+  {"レベルがThresholdUp-Rangeを下回る場合、差分がThreshold-Rangeでクランプされた値となること", input_diff.(0, -200) == input_diff.(0, -range)}
 ]
 
 for {name, ok} <- checks do
@@ -271,7 +305,9 @@ end
 
 ニー適用後の値に`RatioUp`と`Amount`を反映して、最終的なゲイン変化量(dB)を求める。`RatioUp`が1なら変化なし、1より大きいほど強く圧縮/拡大がかかる。
 
-このゲイン自体には上限のクランプを設けていない(`RatioUp >= 1`である限り、出力レベルは数式上`ThresholdUp`未満に自己収束するため不要)。暴走しうるのは`RatioUp`/`RatioDown`を意図的に1未満にする特殊な使い方をしたときだけで、その安全対策は`dyn.pd`の出力直前(`clip~ -1 1`によるハードクリップ)で行っている。
+この瞬間値のゲイン算出自体には上限のクランプを設けていない。この瞬間値を**そのまま**出力に反映する限り、`RatioUp`の値によらず「ゲイン ≤ ニー適用後の差分」が常に成り立つ(下のチェックで検証)。`Knee=0`(ハードニー)ならこれはそのまま「出力 ≤ `ThresholdUp`」を意味するが、`Knee>0`の場合はニーの丸め(二次曲線)部分が鋭角の差分そのものよりわずかに大きい値を取る性質上、最大`Knee/4`dBだけ`ThresholdUp`を超える可能性がある。これはニー境界での滑らかさ(連続性)を保つために生じる意図された挙動であり、バグではない。
+
+一方、実際には前段の「アタック・リリース適用」でレベル自体を滑らかに追従させているため、無音明けなど真の瞬時レベルが急変した直後は、まだ追従しきれていない(古い)平滑化後レベルに基づいてゲインが計算され続けてしまうことがある。この場合、真のレベルに対しては本来もっと小さいはずのゲインが、まだ大きいまま適用され続け、上記の(ニーの丸め分を除けば)ほぼ`ThresholdUp`に収まるはずの挙動が大きく崩れて、出力が瞬間的に`ThresholdUp`を大幅に超えることがある。その対策は後述の「スパイク抑制」で行っている。
 
 #### パラメータ
 
@@ -324,12 +360,36 @@ Vl.new(width: 600, height: 300)
 ```
 
 ```elixir
+threshold = -20.0
+range = 15.0
+levels = for l <- -80..-20, do: l * 1.0
+ratios = [0.01, 0.25, 0.5, 1, 2, 6, 12, 100]
+amounts = [0, 25, 50, 75, 100]
+
+# Knee=0(ハードニー)なら、RatioUpによらず厳密に output <= ThresholdUp
+hard_knee_self_limit_ok? =
+  for ratio <- ratios, level <- levels do
+    diff = threshold - max(level, threshold - range)
+    level + gain_fn.(diff, 0, ratio, 100) <= threshold + 1.0e-9
+  end
+  |> Enum.all?()
+
+# Knee>0でも、ゲインはニー適用後の差分(kneed(diff, knee))を超えない
+gain_never_exceeds_kneed_diff? =
+  for ratio <- ratios, knee <- [3, 6, 9, 12], amount <- amounts, level <- levels do
+    diff = threshold - max(level, threshold - range)
+    gain_fn.(diff, knee, ratio, amount) <= knee_fn.(diff, knee) + 1.0e-9
+  end
+  |> Enum.all?()
+
 checks = [
   {"Amountが0の場合、ゲインが常に0となること", gain_fn.(10, 6, 2, 0) == 0},
   {"RatioUpが1の場合、ゲインが常に0となること(圧縮/拡張なし)", gain_fn.(10, 6, 1, 100) == 0},
   {"RatioUp>1かつ差分が正(静か)の場合、ゲインが正(ブースト)となること", gain_fn.(10, 6, 2, 100) > 0},
   {"RatioUp<1かつ差分が正の場合、ゲインが負(カット)となること", gain_fn.(10, 6, 0.5, 100) < 0},
-  {"ゲインにクランプは無く、差分に比例して大きくなり続けること", gain_fn.(1000, 0, 100, 100) > 36}
+  {"ゲインにクランプは無く、差分に比例して大きくなり続けること", gain_fn.(1000, 0, 100, 100) > 36},
+  {"Knee=0なら、RatioUpの値によらず瞬間値をそのまま適用しても出力はThresholdUp以下に収束すること", hard_knee_self_limit_ok?},
+  {"Knee>0でも、ゲインはニー適用後の差分(kneed(diff,knee))を超えないこと", gain_never_exceeds_kneed_diff?}
 ]
 
 for {name, ok} <- checks do
@@ -344,22 +404,140 @@ else
 end
 ```
 
-### アタック・リリース適用
+### スパイク抑制
 
-ゲイン算出の結果(瞬間値)をそのまま音量に反映すると、値が飛んでクリック音(ジッパーノイズ)が出てしまうため、`glide2~`で`Attack`/`Release`の時間をかけてなめらかに追従させる。
+「ゲイン算出」節で示した通り、真の瞬時レベルに対して計算されたゲインをそのまま適用する限り、出力は(ニーの丸め分を除けば)`ThresholdUp`にほぼ収まる。しかし`lag2~`は(ゲインではなくレベル自体を)目標値に指数関数的に漸近させているだけなので、無音明けなど急な変化の直後は、まだ追従しきれていない(より深い無音寄りの)平滑化後レベルに基づいた大きいゲインを、真のレベルはとっくに上がっているのに引きずったまま適用してしまうことがある。これにより、入力が`ThresholdUp`未満のままでも出力が瞬間的にそれを超えたり、入力がそもそも`ThresholdUp`より大きい(本来パススルーのはずの)場面で、一瞬だけ入力よりはるかに大きい音量になることがある。
 
-`glide2~`は値が**上昇するとき**と**下降するとき**で別々の時間を持てる。アップワード処理部では、ゲインが上がる(ブーストが強まる)ときに`Attack`、下がるときに`Release`がそのまま使われる。ダウンワード処理部ではゲインが負の値(カット)で、カットが強まるほど値は**下降**するため、`Attack`と`Release`が値の増減に対して入れ替わって渡される(`stage.pd`のコメント参照)。
+対策として、算出されたゲインに、その時点の(平滑化前の、真の)RMSレベルから導かれる上限を、超えている場合のみ適用する。この上限は新しい定数ではなく、実際のゲイン計算式(「ゲイン算出」節)と全く同じ式に、レベルだけ真のRMSレベルを代入したものである。
 
-#### パラメータ
+**実装時の落とし穴(1)**: 当初は`max(ThresholdUp - RMS, 0)`(ニー適用なしの単純な差分)を上限にしていたが、これは誤りだった。ソフトニーの二次曲線部分は、鋭角の差分そのものより最大`Knee/4`dB大きい値を取る(「ゲイン算出」節参照)。単純な差分を上限にすると、平滑化後レベルが真のレベルに追従できている**正常時**でも、この丸め分だけ正しいゲインを誤って切り詰めてしまう。ニー関数まで含めて上限を計算する必要がある。
 
-| パラメータ名 | 範囲       |
-| ------------------ | ------------ |
-| `Attack`           | 0.1 〜 5000 |
-| `Release`          | 0.1 〜 5000 |
+**実装時の落とし穴(2)**: 次に、上限を`kneed(ThresholdUp - RMS, Knee)`(`RatioUp`・`Amount`によるスケーリングを含まない)としていたが、これも不十分だった。実際のゲインには常に`(Amount/100)×(1-1/RatioUp)`という1以下の係数がかかるため、スケーリング無しの上限は「`RatioUp`が無限大・`Amount`が100%」を暗黙に仮定した、実際より緩い(甘い)上限になっていた。`RatioUp`を大きく(この仮定に近く)取るほど、ゲインと上限がほぼ同じ値まで接近してしまい、平滑化後レベルと真のレベルのわずかな差だけで簡単に上限を超え、`RatioUp`の値によらずクランプが常時発動してしまうことが実機確認で判明した。上限にも同じ`(Amount/100)×(1-1/RatioUp)`のスケーリングを掛けることで、平滑化後レベルと真のレベルが一致する(=平滑化が追いついている)通常時は、`RatioUp`の値によらず数式上ちょうど一致してクランプが働かず、乖離がある時だけ正しく発動するようになる。
+
+**実装時の落とし穴(3)**: 上限の式に代入する「真のRMSレベル」は、`lag2~`によるAttack/Release平滑化を一切経由していない生の値である。これは意図的な設計(真の瞬時レベルを基準にするからこそ安全装置として機能する)だが、副作用として、RMS検出窓が基音の半周期より短い低いファンダメンタルの素材では、この生レベル自体が周期的にリップルし、それがそのままクランプの上限を毎周期揺らして`min()`経由でゲインに音声レート相当の変調(ゲイン変調ノイズ)を作ってしまうことが実測で判明した。`Knee`がハードなほど`kneed()`の折れ点が鋭くなり、この症状が悪化する。
+
+対策として、生RMSをクランプの上限計算に使う直前にだけ、短く対称なローパス(`lop~ 20`)を挟むことを試した。オフラインシミュレーションでは、ゲイン変調ノイズが約5.3dB改善し、無音明けの安全機能への影響も50ms以内に収束する見込みだったが、**実機での聴感確認の結果、無音明けのトランジェントが逆に特大音量になる回帰が発生し、この対策は撤回した**。シミュレーションで使った合成テスト信号(緩やかな正弦波の立ち上がり)では、20msという遅延の影響を過小評価していたと考えられる。実際の808のような鋭いアタックでは、クランプの反応がわずかに遅れるだけでも、`main`が最大値に貼り付いたまま漏れ出す時間が体感上大きく伸びてしまうらしい。
+
+**実装時の落とし穴(4)**: 次に、対称ローパスの代わりに`main`側と同じ`lag2~`(レベル上昇時=ほぼ瞬時、下降時=15〜30ms、という非対称なスムージング)を試そうとしたが、実際の808ではなく緩やかな合成正弦波でしか無音明けの安全性を検証していなかった。改めてフルスケール矩形波・インパルスなど鋭いオンセットで検証したところ、上昇時定数を0.1msにしても、無音フロアから瞬時に立ち上がる生レベルには追随しきれず、却下済みの対称ローパスと全く同じ+14.85dBの特大音量が再現することが判明した。しかも上昇時定数を0〜0.1msの間でどう振ってもゲイン変調ノイズの低減効果は変わらない(得るものが無くリスクだけがある)ことも確認された。
+
+一方、**上昇時定数を厳密に0にする(瞬時ピークホールドにする)ことには数学的な保証がある**: このときスムージング後のレベルは常に生レベル以上になり(`Lceil ≥ Lraw`)、それによりクランプの上限は常にベースライン以下になる(`ceil_new ≤ ceil_baseline`)。つまり原理的に、この変更によってベースラインより音量が大きくなることはあり得ない。下降時定数は、大きくするほどゲイン変調ノイズは消えていく(60でほぼ97%、100でほぼ完全)が、ピークホールド的な性質上クランプの上限が平均的にやや厳しめになり、テール部や連打時のアップワード効果自体がわずかに痩せるコストがあるため、200を超えない範囲(60〜100)で運用する。
+
+**RMS検出窓との関係**: この対策の効果は、RMS検出窓(`RmsWindowMs`)が短いほど大きい。窓を20ms以上まで伸ばすと、生RMS自体のリップルがすでにほぼ消えてしまうため、この対策の恩恵は乗りにくくなる。一方で無音明けのオンセット漏れは窓を伸ばすほど悪化する。「RMS窓を短く保ったまま、この対策でリップルだけを別途消す」方が、「RMS窓を伸ばすだけ」より両立性が高い。
+
+ダウンワード処理部では適用しない(後述)。
 
 #### 処理内容
 
-`glide2~`はELSEライブラリの実装まかせのため詳細な数式化はしないが、[実ソース](https://github.com/porres/pd-else/blob/master/Source/Audio/glide2~.c)で挙動を確認済み: 入力(目標値)が1サンプル前の値と違うたびにランプをそこから再スタートする作りになっており、`stage.pd`のように毎サンプル変化する信号を渡すと、指定時間で直線的に到達するのではなく、1次のリーク積分(非対称なワンポール・スムージングで、目標値には指数関数的に漸近する)として働く。
+$$
+\text{safe\_max\_gain} = \frac{\text{Amount}}{100} \times \left(1 - \frac{1}{\max(\text{RatioUp}, 0.01)}\right) \times \text{kneed}(\text{ThresholdUp} - \text{RMS}, \text{Knee})
+$$
+
+$$
+\text{適用ゲイン} = \min(\text{アタック・リリース適用後のゲイン}, \text{safe\_max\_gain})
+$$
+
+```elixir
+safe_max_gain = fn threshold, level, knee, ratio_inv, amount ->
+  amount * 0.01 * (1 - ratio_inv) * knee_fn.(threshold - level, knee)
+end
+
+apply_spike_guard = fn direction, glide_gain, threshold, level, knee, ratio_inv, amount ->
+  if direction < 0 do
+    min(glide_gain, safe_max_gain.(threshold, level, knee, ratio_inv, amount))
+  else
+    glide_gain
+  end
+end
+```
+
+無音明けに、まだ古い(深い無音寄りの)平滑化後レベルを引きずって計算された過大なゲイン(ここでは`RatioUp`が無限大・`Amount`100%の最悪ケースとして40dBのブーストを仮定)が、真のRMSレベルの上昇に伴ってどう頭打ちにされるかを図示する。
+
+```elixir
+threshold = -60.0
+knee = 6
+stale_gain = 40.0
+levels = for l <- -120..0, do: l * 1.0
+
+spike_guard_data =
+  for level <- levels,
+      {kind, gain} <- [
+        {"平滑化後レベルから計算された生のゲイン(古いレベルを引きずっていると仮定)", stale_gain},
+        {"スパイク抑制後", apply_spike_guard.(-1, stale_gain, threshold, level, knee, 0, 100)}
+      ] do
+    %{level: level, gain: gain, kind: kind}
+  end
+
+Vl.new(width: 600, height: 300)
+|> Vl.data_from_values(spike_guard_data)
+|> Vl.mark(:line)
+|> Vl.encode_field(:x, "level", type: :quantitative, title: "現在のRMSレベル")
+|> Vl.encode_field(:y, "gain", type: :quantitative, title: "適用されるゲイン(dB)")
+|> Vl.encode_field(:color, "kind", type: :nominal, title: "")
+```
+
+```elixir
+checks = [
+  {"レベルが閾値未満で、古いゲインが今の上限以下ならそのまま通ること", apply_spike_guard.(-1, 5, -60.0, -90.0, 6, 0, 100) == 5},
+  {"レベルが閾値未満でも、古いゲインが今の上限を超えていれば切り詰められること", apply_spike_guard.(-1, 50, -60.0, -70.0, 6, 0, 100) == 10},
+  {"レベルが閾値以上なら、古いゲインが残っていても0(+ニー丸め分)に強制されること(報告されたスパイクの直接防止)", apply_spike_guard.(-1, 45, -60.0, -40.0, 6, 0, 100) == 0},
+  {"レベルが閾値以上で、ゲインが既に0(追従済み)なら変化しないこと", apply_spike_guard.(-1, 0, -60.0, -40.0, 6, 0, 100) == 0},
+  {"レベルが閾値ちょうどでも、ニーの丸め分(Knee/4)までは正常なゲインを切り詰めないこと", apply_spike_guard.(-1, 1.4, -60.0, -60.0, 6, 0, 100) == 1.4},
+  {"ダウンワード(direction>=0)では常に素通しされ、何もクランプされないこと", apply_spike_guard.(1, 999, -60.0, -40.0, 6, 0, 100) == 999}
+]
+
+for {name, ok} <- checks do
+  IO.puts("#{if ok, do: "✅", else: "❌"} #{name}")
+end
+
+if Enum.all?(checks, fn {_, ok} -> ok end) do
+  :ok
+else
+  failed = Enum.count(checks, fn {_, ok} -> not ok end)
+  raise "#{failed} check#{if failed == 1, do: "", else: "s"} failed"
+end
+```
+
+平滑化後レベルと真のレベルが一致している(=平滑化が追いついている正常時)なら、`RatioUp`・`Amount`・`Knee`の値によらず、クランプは数式上ちょうど一致するだけで誤って切り詰めない(常時発動しない)ことを網羅的に確認する。
+
+```elixir
+spike_threshold = -40.0
+
+no_false_trigger_regardless_of_ratio? =
+  for ratio <- [0.25, 0.5, 1, 2, 6, 12, 100],
+      knee <- [0, 3, 6, 9, 12],
+      amount <- [0, 25, 50, 75, 100],
+      level <- [-80, -60, -50, -40, -30, -20, 0] do
+    ratio_inv = 1 / max(ratio, 0.01)
+    diff = spike_threshold - max(level, -120)
+    g = gain_fn.(diff, knee, ratio, amount)
+    applied = apply_spike_guard.(-1, g, spike_threshold, level, knee, ratio_inv, amount)
+    abs(applied - g) < 1.0e-9
+  end
+  |> Enum.all?()
+
+checks2 = [
+  {"平滑化後レベル=真のレベルなら、RatioUp/Amount/Kneeの値によらずクランプが誤って発動しないこと", no_false_trigger_regardless_of_ratio?}
+]
+
+for {name, ok} <- checks2 do
+  IO.puts("#{if ok, do: "✅", else: "❌"} #{name}")
+end
+
+if Enum.all?(checks2, fn {_, ok} -> ok end) do
+  :ok
+else
+  failed = Enum.count(checks2, fn {_, ok} -> not ok end)
+  raise "#{failed} check#{if failed == 1, do: "", else: "s"} failed"
+end
+```
+
+#### 既知の残存リスク
+
+RMS(`rms.pd`、窓長は`RmsWindowMs`ノブで調整可能・デフォルト8ms)が実際の瞬時音量を検出するまでには、窓の長さ分のタイムラグが原理的に存在する。この間はレベル自体が実際より低く出るため、`safe_max_gain`の天井もごく短時間(最大でも窓長程度)だけ緩くなり得る。これはRMS検出方式を採用したことに伴う不可避のトレードオフであり、ピーク検出に変えない限り解消できないため、許容している。窓を伸ばすほどこのタイムラグ自体は長くなる点に注意(高域のゲイン変調ノイズを減らすことと、無音明けの検出遅延を減らすことはトレードオフの関係にある)。
+
+#### ダウンワード処理部への適用について
+
+ダウンワード処理部(特に`RatioDown`を1未満にする「大きい音をさらに拡張する」特殊なモード)にも同種のダイナミクス上のリスクはあるが、`safe_max_gain`の式が依拠する「固定の着地点(`ThresholdUp`)に必ず収束する」という性質はアップワード特有のもので、ダウンワードの拡張モードには同じ形の(緩いが確実に安全な)上限が存在しない。そのためダウンワード処理部には今のところ適用していない。
 
 ## ダウンワード処理部
 
@@ -369,11 +547,11 @@ end
 flowchart LR
     DIN["入力"] --> DRMS["RMS算出"]
     DIN --> DMULT(("×"))
-    DRMS --> DOVER["差分算出"]
+    DRMS --> DGLIDE["アタック・リリース適用"]
+    DGLIDE --> DOVER["差分算出"]
     DOVER --> DKNEE["ニー適用"]
     DKNEE --> DGAIN["ゲイン算出"]
-    DGAIN --> DGLIDE["アタック・リリース適用"]
-    DGLIDE --> DDB2LIN["db2lin~"]
+    DGAIN --> DDB2LIN["db2lin~"]
     DDB2LIN --> DMULT
     DMULT -->|信号| DOUT((" "))
 
@@ -397,45 +575,8 @@ $$
 \text{適用ゲイン量} = x = \text{OutputGainDbValue} \times \text{AmountValue} \times 0.01
 $$
 
-## ハードクリップ
+## 出力段のハードクリップは撤去済み
 
-出力直前に置かれた安全装置。`RatioUp`・`RatioDown`をともに1以上で使う通常の設定では、数式上0dBFSに到達し得ないため実質発動しない。`RatioDown`を意図的に1未満にする特殊な設定で、かつ信号が大きいときにだけ発動しうる、まれなイレギュラー用の保険。
+以前は出力直前に`clip~`によるハードクリップを安全装置として置いていたが、クリップを入れてもスパイク発生時の聴感上の耳障りさ自体は解消されなかったため撤去した。アップワード処理部は「スパイク抑制」により、`RatioUp`の値によらず瞬間的な超過も含めて数式上`ThresholdUp`(+ニーの丸め分)に収まることが保証されている。
 
-#### 処理内容
-
-$$
-y = \min(\max(x, -1), 1)
-$$
-
-```elixir
-hard_clip = fn x -> x |> max(-1) |> min(1) end
-
-samples = for s <- -20..20, do: s * 0.1
-
-clip_data = for s <- samples, do: %{input: s, output: hard_clip.(s)}
-
-Vl.new(width: 400, height: 300)
-|> Vl.data_from_values(clip_data)
-|> Vl.mark(:line)
-|> Vl.encode_field(:x, "input", type: :quantitative, title: "入力")
-|> Vl.encode_field(:y, "output", type: :quantitative, title: "出力")
-```
-
-```elixir
-checks = [
-  {"範囲内(-1〜1)の値はそのまま通ること", hard_clip.(0.5) == 0.5},
-  {"1を超える値は1にクリップされること", hard_clip.(2.0) == 1.0},
-  {"-1を下回る値は-1にクリップされること", hard_clip.(-2.0) == -1.0}
-]
-
-for {name, ok} <- checks do
-  IO.puts("#{if ok, do: "✅", else: "❌"} #{name}")
-end
-
-if Enum.all?(checks, fn {_, ok} -> ok end) do
-  :ok
-else
-  failed = Enum.count(checks, fn {_, ok} -> not ok end)
-  raise "#{failed} check#{if failed == 1, do: "", else: "s"} failed"
-end
-```
+一方、`RatioDown`を意図的に1未満にする特殊な設定(大きい音をさらに拡張するモード)には同種のスパイク抑制を適用していない(「ダウンワード処理部への適用について」参照)。この設定を使う場合、ゲインに数式上の上限が無いため、出力が0dBFSを超えて実際にデジタルクリップする可能性がある。

@@ -3,10 +3,12 @@
 #X obj 24 474 outlet~;
 #X obj 99 124 metro 1000;
 #X obj 99 174 samplerate~;
-#X obj 99 224 expr $f1*0.0025;
+#X obj 99 224 expr $f1*$f2*0.001;
 #X obj 99 274 sig~;
 #X obj 99 74 loadbang;
 #X obj 24 349 mov.rms~ -size 4096 128;
+#X obj 249 124 r RmsWindowMsValue;
+#X obj 249 174 t b f;
 #X connect 0 0 7 0;
 #X connect 2 0 3 0;
 #X connect 3 0 4 0;
@@ -14,3 +16,6 @@
 #X connect 5 0 7 1 32.................e....vC...vG....7....fC....;
 #X connect 6 0 2 0;
 #X connect 7 0 1 0;
+#X connect 8 0 9 0;
+#X connect 9 1 4 1;
+#X connect 9 0 3 0;
