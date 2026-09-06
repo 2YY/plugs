@@ -5,8 +5,8 @@
 #X obj 424 249 sig~;
 #X obj 499 324 expr~ $v2*(max($v1 \\\,$f3-$f4)-$f3);
 #X obj 574 374 r \$5;
-#X obj 649 374 r KneeValue;
-#X obj 749 374 r AmountValue;
+#X obj 649 374 r \$6;
+#X obj 749 374 r \$9;
 #X obj 374 424 expr~ $v2*(($f5*0.01)*(($f3-1)*(if($f4<=0 \\\,max($v1 \\\,0) \\\,if($v1>=$f4 \\\,$v1 \\\,if($v1<=(-1*$f4) \\\,0 \\\,($v1+$f4)*($v1+$f4)/(4*$f4)))))));
 #X obj 149 299 lag2~;
 #X obj 249 124 r \$2;
@@ -17,14 +17,14 @@
 #X obj 24 874 oversampled-gain;
 #X obj 24 949 outlet~;
 #X obj 424 149 loadbang;
-#X text -426 -2 \$1: アップワードなら -1 \, さもなければ 1 \; \$2: AttackMsValue (ダウンワードの場合はリリースが入るので注意) \; \$3: ReleaseMsValue (ダウンワードの場合はアタックが入るので注意) \; \$4: ThresholdUpValue \; \$5: RatioUpInvValue;
-#X obj 74 249 rms;
+#X text -426 -2 \$1: アップワードなら -1 \, さもなければ 1 \; \$2: AttackMsValue (ダウンワードの場合はリリースが入るので注意) \; \$3: ReleaseMsValue (ダウンワードの場合はアタックが入るので注意) \; \$4: ThresholdUpValue \; \$5: RatioUpInvValue \; \$6: KneeValue \; \$7: RangeValue \; \$8: RmsWindowMsValue \; \$9: AmountValue;
+#X obj 74 249 rms \$8;
 #X obj 74 649 outlet~;
 #X obj 399 924 outlet~;
 #X obj 424 574 expr~ if($v1<0 \\\,min($v2 \\\,($f7*0.01)*(1-$f6)*(if($f5<=0 \\\,max($f3-$v4 \\\,0) \\\,if(($f3-$v4)>=$f5 \\\,($f3-$v4) \\\,if(($f3-$v4)<=(-1*$f5) \\\,0 \\\,(($f3-$v4)+$f5)*(($f3-$v4)+$f5)/(4*$f5)))))) \\\,$v2);
 #X obj 249 224 *~ 6.90775;
 #X obj 149 224 *~ 6.90775;
-#X obj 799 299 r RangeValue;
+#X obj 799 299 r \$7;
 #X obj 124 499 lag2~ 0 60;
 #X connect 0 0 15 0;
 #X connect 0 0 19 0 32.................pA...HC...fZ....x....3L....;

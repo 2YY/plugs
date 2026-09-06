@@ -1,6 +1,6 @@
 #N canvas 827 239 734 565 12;
-#X obj 49 99 r InputGainDbValue;
-#X obj 199 99 r AmountValue;
+#X obj 49 99 r \$1;
+#X obj 199 99 r \$2;
 #X obj 49 149 expr~ $v1*$f2*0.01;
 #X obj 24 199 dbgain~;
 #X obj 24 24 inlet~;

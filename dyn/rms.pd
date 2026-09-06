@@ -7,7 +7,7 @@
 #X obj 99 274 sig~;
 #X obj 99 74 loadbang;
 #X obj 24 349 mov.rms~ -size 4096 128;
-#X obj 249 124 r RmsWindowMsValue;
+#X obj 249 124 r \$1;
 #X obj 249 174 t b f;
 #X connect 0 0 7 0;
 #X connect 2 0 3 0;
